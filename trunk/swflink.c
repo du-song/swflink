@@ -30,7 +30,7 @@
 
 struct config_t
 {
-	int before;
+	int mode;
 	int loglevel;
 };
 struct config_t config;
@@ -51,8 +51,9 @@ int args_callback_option(char*name,char*val) {
 		config.loglevel ++;
 		return 0;
 	}
-	else if (!strcmp(name, "z"))
+	else if (!strcmp(name, "r"))
 	{
+		config.mode = 1;
 		return 0;
 	}
 	else if (!strcmp(name, "V"))
@@ -70,7 +71,7 @@ int args_callback_option(char*name,char*val) {
 static struct options_t options[] = {
 	{"o", "output"},
 	{"v", "verbose"},
-	{"b", "before"},
+	{"r", "replace"},
 	{0,0}
 };
 
@@ -112,9 +113,9 @@ void args_callback_usage(char *name)
 	printf("\n");
 	printf("Usage: %s [-v] [-z] [-o output.swf] main.swf library1.swf [... libraryN.swf]\n", name);
 	printf("\n");
-	printf("-o , --output <outputfile>     explicitly specify output file. (otherwise, output.swf will be used)\n");
-	printf("-v , --verbose                 Be verbose. Use more than one -v for greater effect \n");
-	//printf("-b , --before <object id>      Insert before <object id>, this id must exist in main.swf\n");
+	printf("-o , --output <outputfile>	 Explicitly specify output file. (otherwise, output.swf will be used)\n");
+	printf("-v , --verbose				 Be verbose. Use more than one -v for greater effect \n");
+	printf("-r , --replace				 Replace mode, will replace classes in main.swf if found in library.swf\n");
 	printf("\n");
 }
 
@@ -146,7 +147,7 @@ static char tag_allowed(int id)
 	return 1; 
 }
 
-void do_link(SWF*mainSwf, SWF*libSwf, SWF*newSwf)
+void do_insert(SWF*mainSwf, SWF*libSwf, SWF*newSwf)
 {
 	if(!mainSwf->fileVersion && libSwf)
 		mainSwf->fileVersion = libSwf->fileVersion;
@@ -184,7 +185,7 @@ void do_link(SWF*mainSwf, SWF*libSwf, SWF*newSwf)
 	while(mtag && !swf_isDefiningTag(mtag) && mtag->id!=ST_END)
 	{
 		int num=1;
-		msg("<debug> [main]  write tag %02x (%d bytes in body)", 
+		msg("<debug> [main]  write tag %02x (%d bytes)", 
 			mtag->id, mtag->len);
 		tag = swf_InsertTag(tag, mtag->id);
 		swf_SetBlock(tag, mtag->data, mtag->len);
@@ -195,12 +196,12 @@ void do_link(SWF*mainSwf, SWF*libSwf, SWF*newSwf)
 	while(stag && stag->id!=ST_END)
 	{
 		if(tag_allowed(stag->id)) {
-			msg("<debug> [lib]   write tag %02x (%d bytes in body)", 
+			msg("<debug> [lib]   add tag %02x (%d bytes)", 
 				stag->id, stag->len);
 			tag = swf_InsertTag(tag, stag->id);
 			swf_SetBlock(tag, stag->data, stag->len);
 		} else {
-			msg("<debug> [lib]   ignore tag %02x (%d bytes in body)", 
+			msg("<debug> [lib]   ignore tag %02x (%d bytes)", 
 				stag->id, stag->len);
 		}
 		stag = stag->next;	
@@ -209,7 +210,7 @@ void do_link(SWF*mainSwf, SWF*libSwf, SWF*newSwf)
 	while(mtag && mtag->id!=ST_END)
 	{
 		int num=1;
-		msg("<debug> [main]  write tag %02x (%d bytes in body)", 
+		msg("<debug> [main]  write tag %02x (%d bytes)", 
 			mtag->id, mtag->len);
 		tag = swf_InsertTag(tag, mtag->id);
 		swf_SetBlock(tag, mtag->data, mtag->len);
@@ -221,6 +222,134 @@ void do_link(SWF*mainSwf, SWF*libSwf, SWF*newSwf)
 	swf_DeleteTag(newSwf, tag);
 }
 
+struct lookup_t
+{
+	U16 id;
+	char* name;
+	TAG* tag;
+};
+struct lookup_t lookup[256];
+int cntLookup;
+int lookup_class(char* name) {
+	int i;
+	for (i=0; i<cntLookup; i++) {
+		if (!strcmp(name, lookup[i].name)) return i;
+	}
+	return -1;
+}
+int check_class(TAG* tag, char** name, U16* id) {
+	if (tag->id==ST_DEFINESPRITE && tag->next && tag->next->id==ST_EXPORTASSETS && tag->next->next && tag->next->next->id == ST_DOINITACTION) {
+		//Get id of Tag 1
+		U16 idDefineSprite = swf_GetDefineID(tag);
+		//Get id of Tag 2
+		U16 idExportAsset = 0;
+		TAG *t2 = tag->next;
+		int oldTagPos = swf_GetTagPos(t2);
+		swf_SetTagPos(t2,0);
+		char* nameExportAsset = NULL;
+		int numExportAsset = swf_GetU16(t2);
+		int t;
+		for(t=0;t<numExportAsset;t++){
+			idExportAsset = swf_GetU16(t2);
+			nameExportAsset = swf_GetString(t2);
+		}
+		swf_SetTagPos(t2,oldTagPos);
+		//Get id of Tag 3
+		U16 idDoInitAction = swf_GetDefineID(tag->next->next);
+		//Check and add to symbol table
+		if (idDefineSprite == idExportAsset && idExportAsset == idDoInitAction && numExportAsset) {
+			if (numExportAsset > 1) msg("<error> More than one define in ExportAssets, unsupported, skip.");
+			else {
+				*id = idDefineSprite;
+				*name = nameExportAsset;
+				return TRUE;
+			}
+		}
+	}
+	return FALSE;
+}
+void replace_tag_id(TAG* tag, int old_id, int new_id) {
+	if(swf_isDefiningTag(tag)&&swf_GetDefineID(tag)==old_id) {
+		//msg("<debug> set define id %d", new_id); 
+		swf_SetDefineID(tag, new_id);
+	}
+	int num = swf_GetNumUsedIDs(tag);
+	if(num) {
+		int t;
+		int *ptr = (int*)rfx_alloc(sizeof(int)*num);
+		swf_GetUsedIDs(tag, ptr);
+		for(t=0;t<num;t++) {
+			int id = GET16(&tag->data[ptr[t]]);
+			if(id != old_id) {
+				//msg("<debug> not replace id %d, old_id = %d", id, old_id); 
+			} else {
+				//msg("<debug> replace id %d => %d", id, new_id); 
+				PUT16(&tag->data[ptr[t]], new_id);
+			}
+		}
+	}
+}
+void do_replace(SWF*mainSwf, SWF*libSwf, SWF*newSwf)
+{
+	if(!mainSwf->fileVersion && libSwf)
+		mainSwf->fileVersion = libSwf->fileVersion;
+
+	mainSwf->fileAttributes |= libSwf->fileAttributes;
+
+	swf_FoldAll(mainSwf);
+	swf_FoldAll(libSwf);
+
+	memset(lookup, 0, sizeof(lookup));
+
+	TAG*tag;
+	TAG*mtag,*stag;
+	
+	cntLookup = 0;
+	tag = libSwf->firstTag;
+	while(tag)
+	{
+		if (check_class(tag, &lookup[cntLookup].name, &lookup[cntLookup].id)) {
+			msg("<verbose> Found class %s in library swf, id %d.", lookup[cntLookup].name, lookup[cntLookup].id);
+			lookup[cntLookup].tag = tag;
+			cntLookup ++ ;
+			tag = tag->next->next;
+		}
+		tag = tag->next;
+	}
+	
+	memcpy(newSwf, mainSwf, sizeof(SWF));
+
+	tag = newSwf->firstTag = swf_InsertTag(0, ST_REFLEX); // to be removed later
+
+	mtag = mainSwf->firstTag;
+	while(mtag && mtag->id!=ST_END)
+	{
+		char* className;
+		U16 classId;
+		int i, j;
+		if (check_class(mtag, &className, &classId) && -1!=(i=lookup_class(className))) {
+			msg("<verbose> replacing class %s id %d => %d", className, lookup[i].id, classId);
+			stag = lookup[i].tag;
+			for (j=0;j<3;j++) {
+				tag = swf_InsertTag(tag, stag->id);
+				swf_SetBlock(tag, stag->data, stag->len);
+				replace_tag_id(tag, lookup[i].id, classId);
+				msg("<debug> replace tag %02x (%d bytes)", stag->id, stag->len);
+				stag = stag->next;
+			}
+			mtag = mtag->next->next->next;
+		} else {
+			msg("<debug> add tag %02x (%d bytes)", mtag->id, mtag->len);
+			tag = swf_InsertTag(tag, mtag->id);
+			swf_SetBlock(tag, mtag->data, mtag->len);
+			mtag = mtag->next;
+		}
+	}
+
+	tag = swf_InsertTag(tag, ST_END);
+
+	swf_DeleteTag(newSwf, newSwf->firstTag);
+}
 
 int main(int argn, char *argv[])
 {
@@ -231,30 +360,27 @@ int main(int argn, char *argv[])
 	int t;
 
 	config.loglevel = 2; 
-	config.before = -1;
+	config.mode = 0;
+	//no_extra_tags = 1;
 
 	processargs(argn, argv);
 	initLog(0,-1,0,0,-1,config.loglevel);
 
 	int ret;
-	msg("<verbose> main %s \n", main_filename);
+	msg("<notice> Loading %s", main_filename);
 	fi = open(main_filename, O_RDONLY|O_BINARY);
 	if(fi<0) {
-		msg("<fatal> Failed to open %s\n", main_filename);
+		msg("<fatal> Failed to open %s", main_filename);
 		exit(1);
 	}
 	ret = swf_ReadSWF(fi, &mainSwf);
 	if(ret<0) {
-		msg("<fatal> Failed to read from %s\n", main_filename);
+		msg("<fatal> Failed to read from %s", main_filename);
 		exit(1);
 	}
 
-	msg("<debug> Read %d bytes from main\n", ret);
+	msg("<debug> Read %d bytes from %s.", ret, main_filename);
 	close(fi);
-
-	for(t=0;t<libCount;t++) {
-		msg("<verbose> library (%d) %s\n", t+1, lib_filename[t]);
-	}
 
 	if (!libCount)
 	{
@@ -264,7 +390,7 @@ int main(int argn, char *argv[])
 	t = libCount;
 	{
 		t--;
-		msg("<notice> Linking %s to %s", lib_filename[t], main_filename);
+		msg("<notice> Processing %s", lib_filename[t]);
 		int ret;
 		fi = open(lib_filename[t], O_RDONLY|O_BINARY);
 		if(!fi) {
@@ -278,13 +404,15 @@ int main(int argn, char *argv[])
 		}
 		msg("<debug> Read %d bytes from libSwf file %s\n", ret, lib_filename[t]);
 		close(fi);
-		do_link(&mainSwf, &libSwf, &newSwf);
+		if (config.mode==0) do_insert(&mainSwf, &libSwf, &newSwf);
+		else if (config.mode==1) do_replace(&mainSwf, &libSwf, &newSwf);
 		mainSwf = newSwf;
 	} while (t>0);
 
 	if(!newSwf.fileVersion)
 		newSwf.fileVersion = 4;
 
+	msg("<notice> Writing into %s", outputname);
 	fi = open(outputname, O_BINARY|O_RDWR|O_TRUNC|O_CREAT, 0666);
 
 	if(1) { // force zlib
