@@ -219,7 +219,7 @@ void do_insert(SWF*mainSwf, SWF*libSwf, SWF*newSwf)
 
 	tag = swf_InsertTag(tag, ST_END);
 
-	swf_DeleteTag(newSwf, tag);
+	swf_DeleteTag(newSwf, newSwf->firstTag);
 }
 
 struct lookup_t
