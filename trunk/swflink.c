@@ -81,6 +81,7 @@ int args_callback_longoption(char*name,char*val) {
 
 int args_callback_command(char*name, char*val) {
 	char*myname = strdup(name);
+	/*
 	char*filename;
 	filename = strchr(myname, '=');
 	if(filename) {
@@ -96,13 +97,11 @@ int args_callback_command(char*name, char*val) {
 		myname = path;
 		filename = name;
 	}
-
+	*/
 	if(!main_filename) {
-		main_filename = filename;
+		main_filename = myname;
 	} else {		 
-		msg("<verbose> library entity %s (named \"%s\")\n", filename, myname);
-
-		lib_filename[libCount] = filename;
+		lib_filename[libCount] = myname;
 		libCount ++;
 	}
 	return 0;
@@ -113,9 +112,9 @@ void args_callback_usage(char *name)
 	printf("\n");
 	printf("Usage: %s [-v] [-z] [-o output.swf] main.swf library1.swf [... libraryN.swf]\n", name);
 	printf("\n");
-	printf("-o , --output <outputfile>	 Explicitly specify output file. (otherwise, output.swf will be used)\n");
-	printf("-v , --verbose				 Be verbose. Use more than one -v for greater effect \n");
-	printf("-r , --replace				 Replace mode, will replace classes in main.swf if found in library.swf\n");
+	printf("-o , --output <outputfile>  Explicitly specify output file. (otherwise, output.swf will be used)\n");
+	printf("-v , --verbose              Be verbose. Use more than one -v for greater effect \n");
+	printf("-r , --replace              Replace mode, will replace classes in main.swf if found in library.swf\n");
 	printf("\n");
 }
 
@@ -388,7 +387,7 @@ int main(int argn, char *argv[])
 		return 0;
 	}
 	t = libCount;
-	{
+	while (t>0) {
 		t--;
 		msg("<notice> Processing %s", lib_filename[t]);
 		int ret;
@@ -407,7 +406,7 @@ int main(int argn, char *argv[])
 		if (config.mode==0) do_insert(&mainSwf, &libSwf, &newSwf);
 		else if (config.mode==1) do_replace(&mainSwf, &libSwf, &newSwf);
 		mainSwf = newSwf;
-	} while (t>0);
+	}
 
 	if(!newSwf.fileVersion)
 		newSwf.fileVersion = 4;
